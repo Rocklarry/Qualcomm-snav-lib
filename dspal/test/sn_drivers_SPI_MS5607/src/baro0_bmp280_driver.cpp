@@ -1,0 +1,161 @@
+/*==============================================================================
+ Copyright (c) 2016 Qualcomm Technologies, Inc.
+ All rights reserved. Qualcomm Proprietary and Confidential.
+ ==============================================================================*/
+
+#define DRIVER_NAME "SNAV_ms5607_DRIVER"
+
+#include "snav_drivers.h"
+#include "snav_drivers_io.h"
+
+static pthread_t thread;
+static uint32_t  thread_running = 0;
+static int       file_des       = -1;
+
+extern "C"
+{
+void *     get_driver_interface(void);
+
+static int snav_driver_open(void);
+static int snav_driver_init(int handle);
+static int snav_driver_close(int handle);
+static int snav_driver_get(int handle, SnavDriverGetEnum type, void * data_ptr, uint32_t data_size);
+static int snav_driver_set(int handle, SnavDriverSetEnum type, void * data_ptr, uint32_t data_size);
+
+static int start_driver_thread(void * params);
+static int main_driver_thread(void * params);
+}
+
+
+#include "baro0_driver_core.cpp"
+#include "bmp280_driver_core.cpp"
+
+static int main_driver_thread(void * params)
+{
+  char * spi_device_format      = (char*)"/dev/spi-%d";
+  char spi_device[32];
+  snprintf(spi_device, 32, spi_device_format , baro_port);
+
+  snav_info_print("%s: Starting thread, opening device %s",DRIVER_NAME,spi_device);
+
+  //open the spi port
+  file_des = open(spi_device, O_RDWR);
+   //file_des = open("/dev/iic-11", O_RDWR);
+  if (file_des == -1)
+  {
+    snav_error_print("%s: Failed to open baro spi port %s. Exiting.",DRIVER_NAME,spi_device);
+    return -1;
+  }
+
+  int ms5607_init_ret = ms5607_init();
+  if (ms5607_init_ret !=0 )
+    return ms5607_init_ret;
+
+  snav_info_print("%s: ms5607 initialization successful!", DRIVER_NAME);
+
+  int32_t update_time_us = 20000; //50hz
+  int64_t tnext_loop = snav_get_time_1us();
+  while(1)
+  {
+      int64_t tnow    = snav_get_time_1us();
+    int64_t t_sleep = tnext_loop - tnow;
+
+    tnext_loop += update_time_us;
+
+    if (t_sleep > 0)
+      usleep(t_sleep);
+
+	//snav_info_print("%s: usleep(t_sleep)= %ul",DRIVER_NAME,t_sleep);
+    ms5607_read_data();
+
+    //usleep(19500);
+  }
+
+  return 0;
+}
+
+
+static void *driver_thread_trampoline(void *params)
+{
+  int ret = main_driver_thread(params);
+  thread_running = 0;
+  snav_info_print("%s: Exiting main thread with code (%d)",DRIVER_NAME,ret);
+  pthread_exit(NULL);
+  return NULL;
+}
+
+static int start_driver_thread(void * params)
+{
+  // initialize required pthreads
+  pthread_attr_t   thread_attr;
+  size_t           thread_stack_size = 4 * 1024; // allocate 4KB for the stack
+
+  if (pthread_attr_init(&thread_attr) != 0)
+  {
+    snav_error_print("%s: pthread_read_attr_init returned error",DRIVER_NAME);
+    return -1;
+  }
+  if (pthread_attr_setstacksize(&thread_attr, thread_stack_size) != 0)
+  {
+    snav_error_print("%s: pthread_attr_setstacksize returned error",DRIVER_NAME);
+    return -1;
+  }
+  if (pthread_create(&thread, &thread_attr, driver_thread_trampoline, params) != 0)
+  {
+    snav_error_print("%s: thread_create returned error",DRIVER_NAME);
+    return -1;
+  }
+  else
+  {
+    snav_info_print("%s: thread creation Successful",DRIVER_NAME);
+  }
+
+  thread_running = 1;
+
+  return 0;
+}
+
+
+static int snav_driver_set(int handle, SnavDriverSetEnum type, void *  data_ptr, uint32_t data_size)
+{
+  return baro0_snav_driver_set(handle,type,data_ptr,data_size);
+}
+
+static int snav_driver_get(int handle, SnavDriverGetEnum type, void * data_ptr, uint32_t data_size)
+{
+  return baro0_snav_driver_get(handle,type,data_ptr,data_size);
+}
+
+
+static snav_driver_interface_t interface;
+
+void * get_driver_interface(void)
+{
+  interface.header   = SNAV_DRIVER_HANDLE_HEADER;
+  interface.version  = 1;
+  interface.size     = sizeof(interface);
+  interface.open     = snav_driver_open;
+  interface.init     = snav_driver_init;
+  interface.close    = snav_driver_close;
+  interface.get      = snav_driver_get;
+  interface.set      = snav_driver_set;
+  interface.footer   = SNAV_DRIVER_HANDLE_FOOTER;
+
+  return (void*)&interface;
+}
+
+static int snav_driver_open()
+{
+  return 0;
+}
+
+static int snav_driver_init(int handle)
+{
+  return start_driver_thread(NULL);
+}
+
+static int snav_driver_close(int handle)
+{
+  //TODO
+  return 0;
+}

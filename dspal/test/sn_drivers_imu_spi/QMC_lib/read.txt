@@ -1,0 +1,5 @@
+测试注意
+
+飞控使用外部库
+连接adb push 到无人机 /usr/share/data/adsp/文件下
+libmag0_hmc5883l_driver.so
